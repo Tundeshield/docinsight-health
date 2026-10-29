@@ -1,0 +1,24 @@
+rules_version = '2';
+// Every write goes through Cloud Functions, which check roles and plan limits.
+// The browser only reads, and only its own organisation's data.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function memberDoc(orgId) { return /databases/$(database)/documents/orgs/$(orgId)/members/$(request.auth.uid); }
+    function isMember(orgId) { return signedIn() && exists(memberDoc(orgId)); }
+    function isManager(orgId) { return isMember(orgId) && get(memberDoc(orgId)).data.role in ['owner', 'manager']; }
+
+    match /config/{doc} { allow read: if signedIn(); allow write: if false; }
+    match /users/{uid} { allow read: if signedIn() && request.auth.uid == uid; allow write: if false; }
+
+    match /orgs/{orgId} {
+      allow read: if isMember(orgId);
+      allow write: if false;
+      match /members/{memberUid} { allow read: if isMember(orgId); allow write: if false; }
+      match /sources/{srcId} { allow read: if isMember(orgId); allow write: if false; }
+      match /invites/{token} { allow read: if isManager(orgId); allow write: if false; }
+      match /usage/{month} { allow read: if isManager(orgId); allow write: if false; }
+      match /questions/{qid} { allow read: if isManager(orgId); allow write: if false; }
+    }
+  }
+}

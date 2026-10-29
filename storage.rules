@@ -1,0 +1,24 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function memberDoc(orgId) { return /databases/(default)/documents/orgs/$(orgId)/members/$(request.auth.uid); }
+    function isMember(orgId) { return request.auth != null && firestore.exists(memberDoc(orgId)); }
+    function isManager(orgId) { return isMember(orgId) && firestore.get(memberDoc(orgId)).data.role in ['owner', 'manager']; }
+    function sourceIsUploading(orgId, srcId) {
+      return firestore.exists(/databases/(default)/documents/orgs/$(orgId)/sources/$(srcId)) &&
+             firestore.get(/databases/(default)/documents/orgs/$(orgId)/sources/$(srcId)).data.status == 'uploading';
+    }
+
+    // Original files: managers upload while the document is being created; all staff can open originals
+    // (needed to check scanned pages against the paper copy).
+    match /orgs/{orgId}/uploads/{srcId}/{fileName} {
+      allow read: if isMember(orgId);
+      allow create: if isManager(orgId) && sourceIsUploading(orgId, srcId)
+        && request.resource.size < 150 * 1024 * 1024
+        && (request.resource.contentType.matches('application/pdf|image/.*|text/.*|application/octet-stream'));
+      allow update, delete: if false;
+    }
+    // Processed sections and working files: server only.
+    match /orgs/{orgId}/sources/{allPaths=**} { allow read, write: if false; }
+  }
+}
