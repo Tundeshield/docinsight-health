@@ -16,7 +16,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function token() {
   const acct = auth.getGlobalDefaultAccount();
   if (!acct?.tokens?.refresh_token) throw new Error("Not signed in to Firebase. Run the setup again.");
-  const t = await auth.getAccessToken(acct.tokens.refresh_token, ["https://www.googleapis.com/auth/cloud-platform"]);
+  // Same call the Firebase CLI makes. On a failed refresh it returns the refresh token itself, so check for that.
+  const t = await auth.getAccessToken(acct.tokens.refresh_token, []);
+  if (!t?.access_token || t.access_token === acct.tokens.refresh_token) throw new Error("Your Firebase sign-in has expired. Run: scripts/.tools/node_modules/.bin/firebase login --reauth, then run the setup again.");
   return t.access_token;
 }
 async function api(method, url, body, { allow404 = false, allow409 = false } = {}) {

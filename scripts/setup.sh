@@ -22,9 +22,12 @@ mkdir -p scripts/.tools
 npm install --prefix scripts/.tools firebase-tools@15 --no-audit --no-fund --silent >/dev/null
 FB="$ROOT/scripts/.tools/node_modules/.bin/firebase"
 
-if ! "$FB" login:list 2>/dev/null | grep -q "@"; then
+# Check the saved Firebase sign-in actually works and can see this project; otherwise sign in again.
+can_see_project() { "$FB" projects:list --non-interactive 2>/dev/null | grep -q "$PROJECT"; }
+if ! can_see_project; then
   say "Signing in to Firebase. A Google window will open: choose the account that owns $PROJECT and click Allow."
-  "$FB" login
+  if "$FB" login:list 2>/dev/null | grep -q "@"; then "$FB" login --reauth; else "$FB" login; fi
+  can_see_project || fail "This Google account can't see the $PROJECT project. Run the setup again and choose the account that owns it."
 fi
 
 say "Switching on Firebase services, the database, file storage and permissions"
