@@ -6,3 +6,4 @@ web/.env.local
 *.log
 service-account*.json
 .firebase/
+scripts/.tools/
