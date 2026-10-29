@@ -39,6 +39,16 @@ if ! find_account; then
     say "Signing in to Firebase. A Google window will open: choose the account that owns $PROJECT and click Allow."
     "$FB" login
   fi
+  if ! find_account; then
+    echo; echo "---- Diagnostics: copy everything from here and send it to Claude ----"
+    "$FB" --version
+    "$FB" login:list 2>&1 | tail -n 15
+    for email in $("$FB" login:list 2>/dev/null | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' | sort -u); do
+      echo "-- projects:list as $email"; "$FB" projects:list --non-interactive --account "$email" 2>&1 | tail -n 25
+      echo "-- apps:list on $PROJECT as $email"; "$FB" apps:list --project "$PROJECT" --non-interactive --account "$email" 2>&1 | tail -n 12
+    done
+    echo "---- end of diagnostics ----"
+  fi
   find_account || fail "None of your signed-in Google accounts can see the $PROJECT project. Open https://console.firebase.google.com, check which account owns $PROJECT (top-right avatar), then run the setup again and choose that account."
 fi
 echo "   Using $ACCOUNT"
