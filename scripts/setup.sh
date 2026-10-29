@@ -22,22 +22,35 @@ mkdir -p scripts/.tools
 npm install --prefix scripts/.tools firebase-tools@15 --no-audit --no-fund --silent >/dev/null
 FB="$ROOT/scripts/.tools/node_modules/.bin/firebase"
 
-# Check the saved Firebase sign-in actually works and can see this project; otherwise sign in again.
-can_see_project() { "$FB" projects:list --non-interactive 2>/dev/null | grep -q "$PROJECT"; }
-if ! can_see_project; then
-  say "Signing in to Firebase. A Google window will open: choose the account that owns $PROJECT and click Allow."
-  if "$FB" login:list 2>/dev/null | grep -q "@"; then "$FB" login --reauth; else "$FB" login; fi
-  can_see_project || fail "This Google account can't see the $PROJECT project. Run the setup again and choose the account that owns it."
+# Find a signed-in Google account that can see this project; if none can, add one.
+ACCOUNT=""
+find_account() {
+  ACCOUNT=""
+  for email in $("$FB" login:list 2>/dev/null | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' | sort -u); do
+    if "$FB" projects:list --non-interactive --account "$email" 2>/dev/null | grep -q "$PROJECT"; then ACCOUNT="$email"; return 0; fi
+  done
+  return 1
+}
+if ! find_account; then
+  if "$FB" login:list 2>/dev/null | grep -q "@"; then
+    say "None of your saved Firebase sign-ins can see $PROJECT. A Google window will open: choose the Google account you used to create $PROJECT (it's the one signed in to the Firebase console where you copied the config), and click Allow."
+    "$FB" login:add || true
+  else
+    say "Signing in to Firebase. A Google window will open: choose the account that owns $PROJECT and click Allow."
+    "$FB" login
+  fi
+  find_account || fail "None of your signed-in Google accounts can see the $PROJECT project. Open https://console.firebase.google.com, check which account owns $PROJECT (top-right avatar), then run the setup again and choose that account."
 fi
+echo "   Using $ACCOUNT"
 
 say "Switching on Firebase services, the database, file storage and permissions"
-node scripts/setup-cloud.mjs "$PROJECT" "$ROOT/scripts/.tools/node_modules/firebase-tools"
+node scripts/setup-cloud.mjs "$PROJECT" "$ROOT/scripts/.tools/node_modules/firebase-tools" "$ACCOUNT"
 
 say "Installing the server code's packages"
 npm ci --prefix functions --no-audit --no-fund --silent >/dev/null
 
 say "Deploying the server, database rules and storage rules (5 to 10 minutes the first time)"
-deploy() { "$FB" deploy --only firestore,storage,functions --project "$PROJECT" --force --non-interactive; }
+deploy() { "$FB" deploy --only firestore,storage,functions --project "$PROJECT" --account "$ACCOUNT" --force --non-interactive; }
 if ! deploy; then
   say "First deploys sometimes fail while Google finishes switching services on. Waiting 90 seconds and trying again."
   sleep 90

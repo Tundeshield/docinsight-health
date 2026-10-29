@@ -4,7 +4,7 @@
 import { createRequire } from "node:module";
 import readline from "node:readline";
 
-const [projectId, toolsDir] = process.argv.slice(2);
+const [projectId, toolsDir, email] = process.argv.slice(2);
 const require = createRequire(import.meta.url);
 const auth = require(`${toolsDir}/lib/auth.js`);
 const REGION = "europe-west1";
@@ -14,7 +14,7 @@ const log = (m) => console.log(`   ${m}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function token() {
-  const acct = auth.getGlobalDefaultAccount();
+  const acct = (auth.getAllAccounts() || []).find((a) => a.user?.email === email) || auth.getGlobalDefaultAccount();
   if (!acct?.tokens?.refresh_token) throw new Error("Not signed in to Firebase. Run the setup again.");
   // Same call the Firebase CLI makes. On a failed refresh it returns the refresh token itself, so check for that.
   const t = await auth.getAccessToken(acct.tokens.refresh_token, []);
