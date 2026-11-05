@@ -1,0 +1,44 @@
+name: Deploy backend
+# Deploys Cloud Functions, Firestore rules and indexes, and Storage rules to Firebase.
+# Signs in to Google without stored keys (Workload Identity Federation, set up once by scripts/setup.sh).
+on:
+  push:
+    branches: [main]
+    paths: ["functions/**", "shared/**", "firestore.rules", "firestore.indexes.json", "storage.rules", "firebase.json", "scripts/provision.mjs", ".github/workflows/deploy.yml"]
+  workflow_dispatch:
+concurrency: { group: deploy, cancel-in-progress: false }
+permissions: { contents: read, id-token: write }
+env:
+  PROJECT_ID: docinsight-health
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: "**/package-lock.json" }
+      - run: npm ci
+      - run: npm ci --prefix functions
+      - name: Typecheck and build functions
+        run: npm --prefix functions run typecheck && npm --prefix functions run build
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/624234745329/locations/global/workloadIdentityPools/github/providers/github
+          service_account: github-deployer@docinsight-health.iam.gserviceaccount.com
+          create_credentials_file: true
+          export_environment_variables: true
+      - name: Configure sign-in, OCR, storage access and backups
+        run: node scripts/provision.mjs
+      - name: Deploy
+        run: |
+          for i in 1 2 3; do
+            npx firebase deploy --only firestore,storage,functions --project "$PROJECT_ID" --force --non-interactive && exit 0
+            echo "Deploy attempt $i failed; waiting before retrying (new projects take a few minutes to settle)"; sleep 90
+          done
+          exit 1
+      - name: Default prices, settings and hub collections
+        run: node functions/lib/ops.js config
+      - name: Health check
+        run: curl -fsS "https://europe-west1-${PROJECT_ID}.cloudfunctions.net/health" || curl -sS "https://europe-west1-${PROJECT_ID}.cloudfunctions.net/health"

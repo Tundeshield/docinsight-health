@@ -4,8 +4,10 @@
 .env.local
 .firebase/
 dist/
+eval-report.json
 firebase-debug.log*
 firestore-debug.log*
+functions/.env.*
 functions/.env.local
 lib/
 node_modules/

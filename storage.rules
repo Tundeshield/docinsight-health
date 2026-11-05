@@ -72,6 +72,11 @@ service firebase.storage {
         || isPlatformAdmin();
       allow write: if false;
     }
+    // Hub drafts (page images and text awaiting the digitisation check): platform admins only.
+    match /hubDrafts/{path=**} {
+      allow read: if isPlatformAdmin();
+      allow write: if false;
+    }
     match /hubUploads/{contentId}/{versionId}/{fileName} {
       allow read: if false;
       allow create: if isPlatformAdmin() && request.resource.size < 100 * 1024 * 1024;
