@@ -9,7 +9,7 @@ firebase-debug.log*
 firestore-debug.log*
 functions/.env.*
 functions/.env.local
-lib/
+functions/lib/
 node_modules/
 scripts/.tools/
 service-account*.json
