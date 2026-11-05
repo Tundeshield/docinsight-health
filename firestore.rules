@@ -1,24 +1,177 @@
 rules_version = '2';
-// Every write goes through Cloud Functions, which check roles and plan limits.
-// The browser only reads, and only its own organisation's data.
+
+// DocInsight Health. Tenant isolation is enforced here and re-checked in every Cloud Function.
+// Clients only READ institution data. Every write goes through Cloud Functions, which check
+// roles, plan limits and billing status, and write the audit log. The few exceptions are a
+// user's own personal data: favourites, inbox read markers, push tokens and settings.
+//
+// Membership documents are the source of truth (not token claims), so removing a person,
+// expiring a locum or forcing sign-out takes effect on their very next request.
 service cloud.firestore {
   match /databases/{database}/documents {
+
     function signedIn() { return request.auth != null; }
-    function memberDoc(orgId) { return /databases/$(database)/documents/orgs/$(orgId)/members/$(request.auth.uid); }
-    function isMember(orgId) { return signedIn() && exists(memberDoc(orgId)); }
-    function isManager(orgId) { return isMember(orgId) && get(memberDoc(orgId)).data.role in ['owner', 'manager']; }
-
-    match /config/{doc} { allow read: if signedIn(); allow write: if false; }
-    match /users/{uid} { allow read: if signedIn() && request.auth.uid == uid; allow write: if false; }
-
-    match /orgs/{orgId} {
-      allow read: if isMember(orgId);
-      allow write: if false;
-      match /members/{memberUid} { allow read: if isMember(orgId); allow write: if false; }
-      match /sources/{srcId} { allow read: if isMember(orgId); allow write: if false; }
-      match /invites/{token} { allow read: if isManager(orgId); allow write: if false; }
-      match /usage/{month} { allow read: if isManager(orgId); allow write: if false; }
-      match /questions/{qid} { allow read: if isManager(orgId); allow write: if false; }
+    function uid() { return request.auth.uid; }
+    function isPlatformAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/platformAdmins/$(uid()));
     }
+    function memberPath(i) { return /databases/$(database)/documents/institutions/$(i)/members/$(uid()); }
+
+    // An active, unexpired member whose session started after any forced sign-out.
+    function m(i) { return get(memberPath(i)).data; }
+    function validMember(i) {
+      return signedIn() && exists(memberPath(i))
+        && m(i).status == 'active'
+        && (m(i).expiresAt == null || m(i).expiresAt > request.time)
+        && request.auth.token.auth_time >= m(i).signOutBefore;
+    }
+    // access is derived from billing status + role by Cloud Functions:
+    // full | read (restricted) | admin_only (suspended/cancelled, owners and admins) | none
+    function canRead(i) { return validMember(i) && m(i).access in ['full', 'read', 'admin_only']; }
+    function isManager(i) { return canRead(i) && m(i).role in ['owner', 'admin']; }
+    function isOwner(i) { return canRead(i) && m(i).role == 'owner'; }
+    function seesSpace(i, spaceId) { return canRead(i) && spaceId in m(i).visibleSpaceIds; }
+    function editsSpace(i, spaceId) { return canRead(i) && (m(i).role in ['owner', 'admin'] || spaceId in m(i).editSpaceIds); }
+    function approvesSpace(i, spaceId) { return canRead(i) && (m(i).role in ['owner', 'admin'] || spaceId in m(i).approveSpaceIds); }
+    function managesSpace(i, spaceId) { return editsSpace(i, spaceId) || approvesSpace(i, spaceId); }
+
+    // ---------- Public and platform configuration ----------
+    match /plans/{planId} { allow read: if true; allow write: if false; }
+    match /config/{doc} {
+      allow read: if doc == 'billing' ? signedIn() : isPlatformAdmin();
+      allow write: if false;
+    }
+    match /platformAdmins/{adminUid} {
+      allow read: if signedIn() && (adminUid == uid() || isPlatformAdmin());
+      allow write: if false;
+    }
+
+    // ---------- Users (personal) ----------
+    match /users/{userId} {
+      allow read: if signedIn() && userId == uid();
+      allow write: if false;
+      match /private/settings {
+        allow read: if signedIn() && userId == uid();
+        allow write: if signedIn() && userId == uid()
+          && request.resource.data.keys().hasOnly(['dataSaver', 'emailDigest', 'pushEnabled'])
+          && (!('dataSaver' in request.resource.data) || request.resource.data.dataSaver is bool)
+          && (!('emailDigest' in request.resource.data) || request.resource.data.emailDigest is bool)
+          && (!('pushEnabled' in request.resource.data) || request.resource.data.pushEnabled is bool);
+      }
+      match /tokens/{token} {
+        allow read, delete: if signedIn() && userId == uid();
+        allow create, update: if signedIn() && userId == uid()
+          && request.resource.data.keys().hasOnly(['token', 'platform', 'updatedAt'])
+          && request.resource.data.token is string && request.resource.data.token.size() < 4096;
+      }
+    }
+
+    // ---------- Knowledge Hub (platform-owned, read-only, paid plans) ----------
+    function hubAccess() {
+      return signedIn() && exists(/databases/$(database)/documents/users/$(uid()))
+        && get(/databases/$(database)/documents/users/$(uid())).data.hubAccess == true;
+    }
+    match /hubCollections/{id} { allow read: if hubAccess() || isPlatformAdmin(); allow write: if false; }
+    match /hubContent/{id} {
+      allow read: if (hubAccess() && resource.data.published == true) || isPlatformAdmin();
+      allow write: if false;
+      match /versions/{vid} { allow read: if isPlatformAdmin(); allow write: if false; }
+    }
+    match /hubChunks/{id} { allow read, write: if false; }
+
+    // ---------- Platform operations ----------
+    match /digitisationJobs/{id} { allow read: if isPlatformAdmin(); allow write: if false; }
+    match /platformStats/{id} { allow read: if isPlatformAdmin(); allow write: if false; }
+
+    // ---------- Institutions (tenants) ----------
+    match /institutions/{i} {
+      allow read: if canRead(i) || isPlatformAdmin();
+      allow write: if false;
+
+      match /sites/{siteId} { allow read: if canRead(i) || isPlatformAdmin(); allow write: if false; }
+
+      match /spaces/{spaceId} {
+        allow read: if seesSpace(i, spaceId) || isManager(i) || isPlatformAdmin();
+        allow write: if false;
+      }
+      match /sections/{sectionId} {
+        allow read: if seesSpace(i, resource.data.spaceId) || isManager(i) || isPlatformAdmin();
+        allow write: if false;
+      }
+
+      match /members/{memberId} {
+        allow read: if (signedIn() && memberId == uid()) || isManager(i) || isPlatformAdmin();
+        allow write: if false;
+
+        match /inbox/{itemId} {
+          allow read: if signedIn() && memberId == uid() && canRead(i);
+          // The owner of the inbox may only mark items read
+          allow update: if signedIn() && memberId == uid() && canRead(i)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+          allow create, delete: if false;
+        }
+        match /favourites/{contentId} {
+          allow read, delete: if signedIn() && memberId == uid() && canRead(i);
+          allow create: if signedIn() && memberId == uid() && canRead(i)
+            && request.resource.data.keys().hasOnly(['contentId', 'title', 'spaceId', 'at'])
+            && request.resource.data.contentId == contentId
+            && request.resource.data.title is string && request.resource.data.title.size() <= 300
+            && seesSpace(i, request.resource.data.spaceId);
+          allow update: if false;
+        }
+      }
+
+      match /content/{contentId} {
+        // Staff see only published content in spaces they can see; editors and approvers
+        // of the space also see drafts and items in review.
+        allow read: if (seesSpace(i, resource.data.spaceId) && resource.data.published == true)
+          || managesSpace(i, resource.data.spaceId)
+          || isPlatformAdmin();
+        allow write: if false;
+
+        // Version history: admins, and the space's editors and approvers
+        match /versions/{versionId} {
+          allow read: if managesSpace(i, get(/databases/$(database)/documents/institutions/$(i)/content/$(contentId)).data.spaceId)
+            || isPlatformAdmin();
+          allow write: if false;
+        }
+      }
+
+      match /updates/{updateId} {
+        allow read: if seesSpace(i, resource.data.spaceId) || isManager(i);
+        allow write: if false;
+      }
+
+      match /acknowledgements/{ackId} {
+        allow read: if (canRead(i) && resource.data.userId == uid()) || isManager(i);
+        allow write: if false;
+      }
+
+      // Individual question logs: the asker, or admins when the owner has opted in.
+      match /questions/{qid} {
+        allow read: if (canRead(i) && resource.data.userId == uid())
+          || (isManager(i) && get(/databases/$(database)/documents/institutions/$(i)).data.settings.questionLogOptIn == true);
+        allow write: if false;
+      }
+
+      match /invites/{token} { allow read: if isManager(i); allow write: if false; }
+      match /joinRequests/{requestId} {
+        allow read: if isManager(i) || (signedIn() && requestId == uid());
+        allow write: if false;
+      }
+      match /invoices/{invoiceId} { allow read: if isOwner(i) || isPlatformAdmin(); allow write: if false; }
+      match /usage/{month} { allow read: if isManager(i) || isPlatformAdmin(); allow write: if false; }
+      match /auditLog/{entryId} { allow read: if isManager(i); allow write: if false; }
+      match /notifications/{id} { allow read: if isManager(i); allow write: if false; }
+      match /reports/{id} { allow read: if isManager(i) || isPlatformAdmin(); allow write: if false; }
+
+      // Server-only
+      match /chunks/{chunkId} { allow read, write: if false; }
+      match /events/{eventId} { allow read, write: if false; }
+      match /answerCache/{key} { allow read, write: if false; }
+    }
+
+    // Everything else is closed
+    match /{document=**} { allow read, write: if false; }
   }
 }

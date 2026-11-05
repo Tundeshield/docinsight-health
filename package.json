@@ -1,0 +1,17 @@
+{
+  "name": "docinsight-health",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run shared",
+    "test:rules": "firebase emulators:exec --only firestore,storage --project demo-docinsight \"vitest run tests/rules\"",
+    "typecheck": "tsc -p shared --noEmit && npm --prefix functions run typecheck && npm --prefix web run typecheck"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase": "^11.10.0",
+    "firebase-tools": "^14.11.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

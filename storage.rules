@@ -1,24 +1,82 @@
 rules_version = '2';
+
+// Files are read through the Firebase SDK with these rules checked on every request
+// (no shareable download links). Each rule makes at most two Firestore lookups.
 service firebase.storage {
   match /b/{bucket}/o {
-    function memberDoc(orgId) { return /databases/(default)/documents/orgs/$(orgId)/members/$(request.auth.uid); }
-    function isMember(orgId) { return request.auth != null && firestore.exists(memberDoc(orgId)); }
-    function isManager(orgId) { return isMember(orgId) && firestore.get(memberDoc(orgId)).data.role in ['owner', 'manager']; }
-    function sourceIsUploading(orgId, srcId) {
-      return firestore.exists(/databases/(default)/documents/orgs/$(orgId)/sources/$(srcId)) &&
-             firestore.get(/databases/(default)/documents/orgs/$(orgId)/sources/$(srcId)).data.status == 'uploading';
+    function signedIn() { return request.auth != null; }
+    function member(i) { return firestore.get(/databases/(default)/documents/institutions/$(i)/members/$(request.auth.uid)).data; }
+    function validMember(i) {
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/institutions/$(i)/members/$(request.auth.uid))
+        && member(i).status == 'active'
+        && (member(i).expiresAt == null || member(i).expiresAt > request.time)
+        && request.auth.token.auth_time >= member(i).signOutBefore
+        && member(i).access in ['full', 'read', 'admin_only'];
+    }
+    function isPlatformAdmin() {
+      return signedIn() && firestore.exists(/databases/(default)/documents/platformAdmins/$(request.auth.uid));
     }
 
-    // Original files: managers upload while the document is being created; all staff can open originals
-    // (needed to check scanned pages against the paper copy).
-    match /orgs/{orgId}/uploads/{srcId}/{fileName} {
-      allow read: if isMember(orgId);
-      allow create: if isManager(orgId) && sourceIsUploading(orgId, srcId)
-        && request.resource.size < 150 * 1024 * 1024
-        && (request.resource.contentType.matches('application/pdf|image/.*|text/.*|application/octet-stream'));
+    // Original uploads: written once by the person who created the version, while it is uploading.
+    match /inst/{i}/uploads/{contentId}/{versionId}/{fileName} {
+      allow read: if false;
+      allow create: if signedIn()
+        && firestore.get(/databases/(default)/documents/institutions/$(i)/content/$(contentId)/versions/$(versionId)).data.status == 'uploading'
+        && firestore.get(/databases/(default)/documents/institutions/$(i)/content/$(contentId)/versions/$(versionId)).data.createdBy == request.auth.uid
+        && request.resource.size < 100 * 1024 * 1024
+        && request.resource.contentType.matches('application/pdf|image/(jpeg|png|webp|heic|heif|tiff)|application/vnd.openxmlformats-officedocument.wordprocessingml.document|application/msword|application/octet-stream');
       allow update, delete: if false;
     }
-    // Processed sections and working files: server only.
-    match /orgs/{orgId}/sources/{allPaths=**} { allow read, write: if false; }
+
+    // Processed drafts (page images, text, original): the space's editors and approvers, and admins.
+    match /inst/{i}/drafts/{contentId}/{versionId}/{path=**} {
+      allow read: if (validMember(i) && (member(i).role in ['owner', 'admin']
+          || firestore.get(/databases/(default)/documents/institutions/$(i)/content/$(contentId)).data.spaceId in member(i).editSpaceIds
+          || firestore.get(/databases/(default)/documents/institutions/$(i)/content/$(contentId)).data.spaceId in member(i).approveSpaceIds))
+        || isPlatformAdmin();
+      allow write: if false;
+    }
+
+    // Approved, published versions: everyone who can see the space.
+    match /inst/{i}/published/{spaceId}/{contentId}/{versionId}/{path=**} {
+      allow read: if validMember(i) && (spaceId in member(i).visibleSpaceIds || member(i).role in ['owner', 'admin']);
+      allow write: if false;
+    }
+
+    // Institution logo: public (shown on sign-in and join pages); managers upload it.
+    match /inst/{i}/branding/{fileName} {
+      allow read: if true;
+      allow write: if validMember(i) && member(i).role in ['owner', 'admin']
+        && request.resource.size < 2 * 1024 * 1024
+        && request.resource.contentType.matches('image/(png|jpeg|webp|svg\\+xml)');
+    }
+
+    // Invoices and receipts: the institution owner and platform admins.
+    match /inst/{i}/invoices/{fileName} {
+      allow read: if (validMember(i) && member(i).role == 'owner') || isPlatformAdmin();
+      allow write: if false;
+    }
+
+    // Exports prepared for one person.
+    match /inst/{i}/exports/{userId}/{fileName} {
+      allow read: if signedIn() && request.auth.uid == userId && validMember(i);
+      allow write: if false;
+    }
+
+    // Knowledge Hub: any member of a paying institution.
+    match /hub/{path=**} {
+      allow read: if (signedIn()
+          && firestore.exists(/databases/(default)/documents/users/$(request.auth.uid))
+          && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.hubAccess == true)
+        || isPlatformAdmin();
+      allow write: if false;
+    }
+    match /hubUploads/{contentId}/{versionId}/{fileName} {
+      allow read: if false;
+      allow create: if isPlatformAdmin() && request.resource.size < 100 * 1024 * 1024;
+    }
+
+    match /{allPaths=**} { allow read, write: if false; }
   }
 }
